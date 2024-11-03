@@ -157,3 +157,36 @@ export const handlePageLoad = (
     })
   }
 }
+
+export const startTempAccessCheck = (
+  tabId: number,
+  url: string,
+  pattern: string,
+  state: BackgroundState,
+  runtime: RuntimeState,
+) => {
+  stopTempAccessCheck(tabId, runtime)
+
+  runtime.intervals[tabId] = setInterval(() => {
+    const updatedTempAccess = syncTempAccess(state.tempAccess)
+    const tempAccessURLs = updatedTempAccess.map(temp => temp.blockPattern)
+    const mindlessURLs = state.dangerList || []
+
+    if (isMindless(url, mindlessURLs, tempAccessURLs, state)) {
+      stopTempAccessCheck(tabId, runtime)
+      browser.tabs.update(tabId, {
+        url: browser.runtime.getURL(`stop.html?url=${url}&pattern=${pattern}`)
+      })
+    }
+  }, 1000)
+}
+
+export const stopTempAccessCheck = (
+  tabId: number,
+  runtime: RuntimeState,
+) => {
+  if (runtime.intervals?.[tabId]) {
+    clearInterval(runtime.intervals[tabId])
+    delete runtime.intervals[tabId]
+  }
+}

@@ -5,6 +5,8 @@ import {
   syncStorage,
   handleStorageChange,
   handlePageLoad,
+  startTempAccessCheck,
+  stopTempAccessCheck,
 } from './API/API'
 import {defaultQuotes} from '../allQuotes'
 import {MiuStorage} from '@types'
@@ -18,6 +20,10 @@ export type BackgroundState = {
   lastUrl: string
 }
 
+export type RuntimeState = {
+  intervals: Record<number, NodeJS.Timer>
+}
+
 const main = () => {
   const state: BackgroundState = {
     tempAccess: [],
@@ -27,13 +33,16 @@ const main = () => {
     isMIUEnabled: true,
   }
 
+  const runtime: RuntimeState = {
+    intervals: {}
+  }
+
   syncStorage(defaultQuotes, async () => {
-    const {dangerList, tempAccess, isMIUEnabled} =
-      (await browser.storage.sync.get([
-        'dangerList',
-        'tempAccess',
-        'isMIUEnabled',
-      ])) as Pick<MiuStorage, 'dangerList' | 'tempAccess' | 'isMIUEnabled'>
+    const {dangerList, tempAccess, isMIUEnabled} = (await browser.storage.sync.get([
+      'dangerList',
+      'tempAccess',
+      'isMIUEnabled',
+    ])) as Pick<MiuStorage, 'dangerList' | 'tempAccess' | 'isMIUEnabled'>
 
     state.dangerList = dangerList
     state.tempAccess = syncTempAccess(tempAccess)
@@ -50,15 +59,26 @@ const main = () => {
           currentWindow: true,
         })
 
+        // Clear intervals for all other tabs
+        Object.keys(runtime.intervals).forEach(tabId => {
+          if (Number(tabId) !== currentTab.id) {
+            stopTempAccessCheck(Number(tabId), runtime)
+          }
+        })
+
         state.tempAccess = syncTempAccess(state.tempAccess)
-        handlePageLoad({url: currentTab.url, tabId: currentTab.id}, state)
+        handlePageLoad({url: currentTab.url, tabId: currentTab.id}, state, runtime)
       } catch (e) {
         errorHandler(e as Error, {extra: 'functionName: onActivated'})
       }
     })
 
     browser.windows.onFocusChanged.addListener(async windowId => {
-      if (windowId === -1) {
+      if (windowId === browser.windows.WINDOW_ID_NONE) {
+        // Clear all intervals when window loses focus
+        Object.keys(runtime.intervals).forEach(tabId => {
+          stopTempAccessCheck(Number(tabId), runtime)
+        })
         return
       }
 
@@ -69,7 +89,7 @@ const main = () => {
         })
 
         state.tempAccess = syncTempAccess(state.tempAccess)
-        handlePageLoad({url: currentTab.url, tabId: currentTab.id}, state)
+        handlePageLoad({url: currentTab.url, tabId: currentTab.id}, state, runtime)
       } catch (e) {
         errorHandler(e as Error, {extra: 'functionName: onFocusChanged'})
       }
@@ -77,13 +97,15 @@ const main = () => {
 
     browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
       try {
-        const isStopPage = tab.url.includes(
-          browser.runtime.getURL('/stop.html'),
-        )
+        const isStopPage = tab.url.includes(browser.runtime.getURL('/stop.html'))
+
+        if (changeInfo.url) {
+          stopTempAccessCheck(tabId, runtime)
+        }
 
         if (!isStopPage) {
           state.tempAccess = syncTempAccess(state.tempAccess)
-          handlePageLoad({url: tab.url, tabId}, state)
+          handlePageLoad({url: tab.url, tabId}, state, runtime)
         }
       } catch (e) {
         errorHandler(e as Error, {
@@ -91,6 +113,19 @@ const main = () => {
         })
       }
     })
+
+    browser.tabs.onRemoved.addListener((tabId) => {
+      stopTempAccessCheck(tabId, runtime)
+    })
+
+    // Optional: Clean up on browser shutdown if supported
+    if (browser.runtime.onSuspend) {
+      browser.runtime.onSuspend.addListener(() => {
+        Object.keys(runtime.intervals).forEach(tabId => {
+          stopTempAccessCheck(Number(tabId), runtime)
+        })
+      })
+    }
   })
 }
 
